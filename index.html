@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+
+  <!-- Security: script-src locked to 'self' (no inline/external/injected JS can run — this is what
+       blocks XSS/exfiltration). style-src allows inline styles (CSS can't execute code, so this does
+       not weaken the script protection). No third-party origins anywhere; data: is for icons only. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+
+  <title>Clarity</title>
+  <meta name="description" content="Low-friction cognitive activeness & meal tracker." />
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#0e1626" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f5f7fb" media="(prefers-color-scheme: light)" />
+
+  <!-- iOS home-screen app -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Clarity" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="icon" href="icons/icon-192.png" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Backup reminder banner (shown/hidden by app.js) -->
+  <div id="backup-banner" class="banner" hidden></div>
+
+  <!-- Main view container; all screens render here -->
+  <main id="app" class="app"></main>
+
+  <!-- Bottom tab bar (extensible: add tabs here later) -->
+  <nav id="tabbar" class="tabbar" aria-label="Sections">
+    <button class="tab" data-tab="track" type="button">
+      <span class="tab__icon" aria-hidden="true">◎</span>
+      <span class="tab__label">Track</span>
+    </button>
+    <button class="tab" data-tab="meals" type="button">
+      <span class="tab__icon" aria-hidden="true">🍽</span>
+      <span class="tab__label">Meals</span>
+    </button>
+    <button class="tab" data-tab="insights" type="button">
+      <span class="tab__icon" aria-hidden="true">📈</span>
+      <span class="tab__label">Insights</span>
+    </button>
+  </nav>
+
+  <script src="app.js"></script>
+</body>
+</html>

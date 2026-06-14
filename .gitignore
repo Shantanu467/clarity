@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Local editor / dev config (not needed for the hosted site)
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
