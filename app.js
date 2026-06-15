@@ -47,6 +47,7 @@
     checkins: 'clarity.checkins',
     settings: 'clarity.settings',
     lastBackup: 'clarity.lastBackup',
+    protocols: 'clarity.protocols',
     schemaVersion: 2
   };
 
@@ -75,7 +76,11 @@
     ),
     // transient view state
     draft: null,        // active check-in
-    mealForm: null      // active meal form
+    mealForm: null,     // active meal form
+    // timers tab
+    protocols: DB.read(K.protocols, []),
+    timerView: 'list',  // 'list' | 'running' | 'editor'
+    protoEdit: null     // protocol being created/edited
   };
 
   function saveMeals() { DB.write(K.meals, state.meals); }
@@ -363,6 +368,9 @@
     state.tab = tab;
     state.draft = null;
     state.mealForm = null;
+    if (tab === 'timers' && _timerActive && !_timerActive.done && state.timerView !== 'editor') {
+      state.timerView = 'running';
+    }
     render();
   }
 
@@ -395,6 +403,11 @@
     if (state.tab === 'track') root.appendChild(state.draft ? viewStepper() : viewTrackHome());
     else if (state.tab === 'meals') root.appendChild(viewMeals());
     else if (state.tab === 'insights') root.appendChild(viewInsights());
+    else if (state.tab === 'timers') {
+      if (state.timerView === 'running') root.appendChild(viewActiveTimer());
+      else if (state.timerView === 'editor') root.appendChild(viewProtocolEditor());
+      else root.appendChild(viewTimers());
+    }
     root.scrollTop = 0;
     window.scrollTo(0, 0);
   }
@@ -840,6 +853,417 @@
   }
 
   /* ============================================================
+     PROTOCOL storage helpers
+     ============================================================ */
+  function saveProtocols() { DB.write(K.protocols, state.protocols); }
+
+  function addProtocol(p) { state.protocols.push(p); saveProtocols(); }
+
+  function deleteProtocol(id) {
+    state.protocols = state.protocols.filter(p => p.id !== id);
+    saveProtocols();
+  }
+
+  function protoSummary(p) {
+    const seq = p.intervals.map(iv => `${iv.label} ${iv.seconds}s`).join(' → ');
+    return `${p.sets} set${p.sets !== 1 ? 's' : ''} · ${seq}`;
+  }
+
+  /* ============================================================
+     AUDIO  (Web Audio API — works offline; iOS requires user gesture first)
+     ============================================================ */
+  let _audioCtx = null;
+
+  function beep(type) {
+    try {
+      if (!window.AudioContext && !window.webkitAudioContext) return;
+      if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const cfgs = {
+        tick:     [{ freq: 880, at: 0,    dur: 0.06, vol: 0.25 }],
+        interval: [{ freq: 660, at: 0,    dur: 0.18, vol: 0.35 }],
+        done: [
+          { freq: 880,  at: 0,    dur: 0.15, vol: 0.4 },
+          { freq: 880,  at: 0.22, dur: 0.15, vol: 0.4 },
+          { freq: 1100, at: 0.44, dur: 0.3,  vol: 0.4 }
+        ]
+      };
+      const play = () => {
+        const T = _audioCtx.currentTime;
+        for (const { freq, at, dur, vol } of (cfgs[type] || [])) {
+          const osc = _audioCtx.createOscillator();
+          const gain = _audioCtx.createGain();
+          osc.connect(gain); gain.connect(_audioCtx.destination);
+          osc.type = 'sine'; osc.frequency.value = freq;
+          const t = T + at;
+          gain.gain.setValueAtTime(0, t);
+          gain.gain.linearRampToValueAtTime(vol, t + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+          osc.start(t); osc.stop(t + dur + 0.05);
+        }
+      };
+      if (_audioCtx.state === 'suspended') _audioCtx.resume().then(play).catch(() => {});
+      else play();
+    } catch (e) { /* audio unavailable */ }
+  }
+
+  /* ============================================================
+     TIMER ENGINE
+     ============================================================ */
+  let _timerActive = null;
+  let _timerTick = null;
+  let _timerBeepSec = -1;
+
+  function timerStart(protocol) {
+    timerStop();
+    _timerBeepSec = -1;
+    _timerActive = { protocol, setIdx: 0, intIdx: 0, endTime: null, msRemaining: null, running: false, done: false };
+    timerResume();
+    beep('interval');
+  }
+
+  function timerPause() {
+    const a = _timerActive;
+    if (!a || !a.running) return;
+    a.msRemaining = Math.max(0, a.endTime - Date.now());
+    a.endTime = null;
+    a.running = false;
+    clearInterval(_timerTick); _timerTick = null;
+    updateTimerDOM();
+  }
+
+  function timerResume() {
+    const a = _timerActive;
+    if (!a || a.done) return;
+    if (_audioCtx && _audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
+    const ms = a.msRemaining != null ? a.msRemaining
+      : (a.endTime != null ? Math.max(0, a.endTime - Date.now())
+      : a.protocol.intervals[a.intIdx].seconds * 1000);
+    a.endTime = Date.now() + ms;
+    a.msRemaining = null;
+    a.running = true;
+    clearInterval(_timerTick);
+    _timerTick = setInterval(timerTick, 200);
+  }
+
+  function timerTick() {
+    const a = _timerActive;
+    if (!a || !a.running) return;
+    const msLeft = Math.max(0, a.endTime - Date.now());
+    const secsLeft = Math.ceil(msLeft / 1000);
+    if (secsLeft > 0 && secsLeft <= 3 && secsLeft !== _timerBeepSec) {
+      _timerBeepSec = secsLeft;
+      beep('tick');
+    }
+    if (msLeft <= 0) timerAdvance();
+    else updateTimerDOM();
+  }
+
+  function timerAdvance() {
+    const a = _timerActive;
+    if (!a) return;
+    _timerBeepSec = -1;
+    a.intIdx++;
+    if (a.intIdx >= a.protocol.intervals.length) {
+      a.intIdx = 0;
+      a.setIdx++;
+      if (a.setIdx >= a.protocol.sets) {
+        a.done = true; a.running = false;
+        clearInterval(_timerTick); _timerTick = null;
+        beep('done');
+        if (state.tab === 'timers') render();
+        return;
+      }
+    }
+    a.endTime = Date.now() + a.protocol.intervals[a.intIdx].seconds * 1000;
+    beep('interval');
+    if (state.tab === 'timers' && state.timerView === 'running') render();
+  }
+
+  function timerSkip() { if (_timerActive) timerAdvance(); }
+
+  function timerStop() {
+    clearInterval(_timerTick); _timerTick = null;
+    _timerActive = null;
+  }
+
+  function fmtCountdown(secs) {
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function intervalBadgeKind(label) {
+    const l = (label || '').toLowerCase();
+    if (/work|go|push|active|on|sprint|lift|effort/.test(l)) return 'work';
+    if (/rest|break|recover|off|pause|relax|cool|down/.test(l)) return 'rest';
+    return 'other';
+  }
+
+  function updateTimerDOM() {
+    const a = _timerActive;
+    const elCd = document.getElementById('tmr-countdown');
+    if (!elCd || !a) return;
+    const msLeft = a.running ? Math.max(0, a.endTime - Date.now()) : (a.msRemaining || 0);
+    const secsLeft = Math.ceil(msLeft / 1000);
+    const iv = a.protocol.intervals[a.intIdx];
+    const pct = iv.seconds > 0 ? (1 - msLeft / (iv.seconds * 1000)) * 100 : 100;
+    elCd.textContent = fmtCountdown(secsLeft);
+    const elBar = document.getElementById('tmr-bar');
+    if (elBar) elBar.style.width = Math.min(100, Math.max(0, pct)).toFixed(1) + '%';
+  }
+
+  /* ============================================================
+     VIEW: Timers — protocol list
+     ============================================================ */
+  function viewTimers() {
+    const frag = document.createDocumentFragment();
+
+    if (_timerActive && _timerActive.running && !_timerActive.done) {
+      const a = _timerActive;
+      const iv = a.protocol.intervals[a.intIdx];
+      frag.appendChild(el('div', {
+        class: 'card card--timer-banner',
+        onclick: () => { state.timerView = 'running'; render(); }
+      }, [
+        el('div', { class: 'row__meta', text: '▶ Timer running — tap to open' }),
+        el('div', { class: 'row__title', text: a.protocol.name }),
+        el('div', { class: 'row__meta', text: `${iv.label} · Set ${a.setIdx + 1} of ${a.protocol.sets}` })
+      ]));
+    }
+
+    frag.appendChild(el('h1', { class: 'h1', text: 'Timers' }));
+    frag.appendChild(el('p', { class: 'sub', text: 'Build interval protocols once, run them anytime.' }));
+
+    frag.appendChild(el('button', {
+      class: 'btn btn--primary btn--lg', type: 'button',
+      onclick: () => {
+        state.protoEdit = {
+          id: uid(), name: '',
+          intervals: [{ label: 'Work', seconds: 30 }, { label: 'Rest', seconds: 10 }],
+          sets: 3, isNew: true
+        };
+        state.timerView = 'editor';
+        render();
+      }
+    }, '＋  New protocol'));
+
+    if (!state.protocols.length) {
+      frag.appendChild(emptyState('⏱', 'No protocols yet — create one above'));
+    } else {
+      frag.appendChild(el('h2', { class: 'h2', text: 'Saved protocols' }));
+      const list = el('div', { class: 'list' });
+      state.protocols.forEach(p => {
+        list.appendChild(el('div', { class: 'proto-row' }, [
+          el('div', { class: 'proto-row__main' }, [
+            el('div', { class: 'proto-row__name', text: p.name || 'Untitled' }),
+            el('div', { class: 'proto-row__meta', text: protoSummary(p) })
+          ]),
+          el('div', { class: 'proto-row__actions' }, [
+            el('button', {
+              type: 'button', 'aria-label': 'Edit', text: '✎',
+              onclick: () => {
+                state.protoEdit = { ...p, intervals: p.intervals.map(iv => ({ ...iv })), isNew: false };
+                state.timerView = 'editor';
+                render();
+              }
+            }),
+            el('button', {
+              type: 'button', 'aria-label': 'Delete', text: '🗑',
+              onclick: () => {
+                if (confirm(`Delete "${p.name || 'this protocol'}"?`)) {
+                  deleteProtocol(p.id); render();
+                }
+              }
+            }),
+            el('button', {
+              type: 'button', 'aria-label': 'Start', class: 'proto-row__start', text: '▶',
+              onclick: () => { timerStart(p); state.timerView = 'running'; render(); }
+            })
+          ])
+        ]));
+      });
+      frag.appendChild(list);
+    }
+    return frag;
+  }
+
+  /* ============================================================
+     VIEW: Protocol editor
+     ============================================================ */
+  function viewProtocolEditor() {
+    const draft = state.protoEdit;
+    const frag = document.createDocumentFragment();
+
+    frag.appendChild(el('div', { class: 'stepper__head' }, [
+      el('span', { class: 'step__count', text: draft.isNew ? 'New protocol' : 'Edit protocol' }),
+      el('button', {
+        class: 'btn btn--ghost', type: 'button',
+        style: 'flex:0 0 auto;width:auto;min-height:40px;padding:0 14px', text: 'Cancel',
+        onclick: () => { state.timerView = 'list'; state.protoEdit = null; render(); }
+      })
+    ]));
+
+    frag.appendChild(el('div', { class: 'field' }, [
+      el('label', { class: 'field__label', text: 'Protocol name' }),
+      (function () {
+        const inp = el('input', { type: 'text', placeholder: 'e.g. 3×30s push', value: draft.name });
+        inp.addEventListener('input', () => { draft.name = inp.value; });
+        return inp;
+      })()
+    ]));
+
+    frag.appendChild(el('label', { class: 'field__label', style: 'display:block;margin:20px 0 10px', text: 'Intervals (in order)' }));
+    const intList = el('div', { class: 'int-list' });
+    draft.intervals.forEach((iv, i) => {
+      intList.appendChild(el('div', { class: 'int-row' }, [
+        (function () {
+          const inp = el('input', { type: 'text', placeholder: 'Label', value: iv.label });
+          inp.addEventListener('input', () => { iv.label = inp.value; });
+          return inp;
+        })(),
+        (function () {
+          const inp = el('input', { type: 'number', min: '5', max: '3600', step: '5', value: String(iv.seconds), 'aria-label': 'Seconds' });
+          inp.addEventListener('change', () => {
+            const v = parseInt(inp.value, 10);
+            if (v >= 5) iv.seconds = v; else inp.value = String(iv.seconds);
+          });
+          return inp;
+        })(),
+        el('span', { class: 'int-row__unit', text: 's' }),
+        el('button', {
+          class: 'int-row__del', type: 'button', 'aria-label': 'Remove', text: '✕',
+          onclick: () => { draft.intervals.splice(i, 1); render(); }
+        })
+      ]));
+    });
+    frag.appendChild(intList);
+
+    frag.appendChild(el('button', {
+      class: 'btn btn--ghost', type: 'button', style: 'margin-top:10px',
+      text: '＋ Add interval',
+      onclick: () => {
+        const last = draft.intervals[draft.intervals.length - 1];
+        const nextLabel = (last && /work|go|push|active|sprint|lift/.test((last.label || '').toLowerCase())) ? 'Rest' : 'Work';
+        draft.intervals.push({ label: nextLabel, seconds: last ? last.seconds : 30 });
+        render();
+      }
+    }));
+
+    frag.appendChild(el('div', { class: 'field', style: 'margin-top:24px' }, [
+      el('label', { class: 'field__label', text: 'Sets (rounds)' }),
+      el('div', { class: 'sets-stepper' }, [
+        el('button', { type: 'button', text: '−', onclick: () => { if (draft.sets > 1) { draft.sets--; render(); } } }),
+        el('div', { class: 'sets-stepper__val', text: String(draft.sets) }),
+        el('button', { type: 'button', text: '＋', onclick: () => { if (draft.sets < 99) { draft.sets++; render(); } } })
+      ])
+    ]));
+
+    const totalSecs = draft.intervals.reduce((s, iv) => s + iv.seconds, 0) * draft.sets;
+    if (totalSecs > 0) {
+      frag.appendChild(el('p', { class: 'muted', style: 'font-size:14px;margin-top:8px', text: `Total ≈ ${fmtDur(Math.ceil(totalSecs / 60))}` }));
+    }
+
+    frag.appendChild(el('button', {
+      class: 'btn btn--primary btn--lg', type: 'button', style: 'margin-top:24px',
+      text: draft.isNew ? 'Save protocol' : 'Update protocol',
+      onclick: () => {
+        if (!draft.name.trim()) { toast('Give the protocol a name'); return; }
+        if (!draft.intervals.length) { toast('Add at least one interval'); return; }
+        if (draft.intervals.some(iv => !iv.label.trim())) { toast('Give each interval a label'); return; }
+        const proto = { id: draft.id, name: draft.name.trim(), intervals: draft.intervals.map(iv => ({ ...iv })), sets: draft.sets };
+        if (draft.isNew) {
+          addProtocol(proto);
+        } else {
+          const idx = state.protocols.findIndex(p => p.id === proto.id);
+          if (idx >= 0) state.protocols[idx] = proto; else state.protocols.push(proto);
+          saveProtocols();
+        }
+        state.protoEdit = null;
+        state.timerView = 'list';
+        toast(draft.isNew ? 'Protocol saved' : 'Protocol updated');
+        render();
+      }
+    }));
+
+    return frag;
+  }
+
+  /* ============================================================
+     VIEW: Active timer
+     ============================================================ */
+  function viewActiveTimer() {
+    const a = _timerActive;
+    if (!a) { state.timerView = 'list'; return viewTimers(); }
+
+    const frag = document.createDocumentFragment();
+
+    frag.appendChild(el('div', { class: 'stepper__head' }, [
+      el('button', {
+        class: 'btn btn--ghost', type: 'button',
+        style: 'flex:0 0 auto;width:auto;min-height:40px;padding:0 14px', text: '‹ Protocols',
+        onclick: () => { state.timerView = 'list'; render(); }
+      }),
+      el('span', { class: 'step__count', text: a.protocol.name })
+    ]));
+
+    if (a.done) {
+      frag.appendChild(el('div', { class: 'tmr-done' }, [
+        el('span', { class: 'tmr-done__emoji', text: '🎉' }),
+        el('div', { class: 'tmr-done__title', text: 'Done!' }),
+        el('div', { class: 'tmr-done__sub', text: `${a.protocol.sets} set${a.protocol.sets !== 1 ? 's' : ''} complete` })
+      ]));
+      frag.appendChild(el('div', { class: 'btn-row', style: 'margin-top:24px' }, [
+        el('button', { class: 'btn btn--primary', type: 'button', text: '↺  Repeat', onclick: () => { timerStart(a.protocol); render(); } }),
+        el('button', { class: 'btn', type: 'button', text: 'Done', onclick: () => { timerStop(); state.timerView = 'list'; render(); } })
+      ]));
+      return frag;
+    }
+
+    const iv = a.protocol.intervals[a.intIdx];
+    const msLeft = a.running ? Math.max(0, a.endTime - Date.now()) : (a.msRemaining != null ? a.msRemaining : iv.seconds * 1000);
+    const secsLeft = Math.ceil(msLeft / 1000);
+    const pct = iv.seconds > 0 ? (1 - msLeft / (iv.seconds * 1000)) * 100 : 0;
+
+    frag.appendChild(el('div', { class: 'tmr-face' }, [
+      el('div', { id: 'tmr-countdown', class: 'tmr-countdown', text: fmtCountdown(secsLeft) }),
+      el('span', { class: `tmr-label-badge tmr-label-badge--${intervalBadgeKind(iv.label)}`, text: iv.label }),
+      el('div', { class: 'tmr-set', text: `Set ${a.setIdx + 1} of ${a.protocol.sets}` })
+    ]));
+
+    const barEl = el('div', { id: 'tmr-bar', class: 'tmr-bar' });
+    barEl.style.width = Math.min(100, Math.max(0, pct)).toFixed(1) + '%';
+    frag.appendChild(el('div', { class: 'tmr-track' }, [barEl]));
+
+    const seqRow = el('div', { class: 'tmr-seq' });
+    a.protocol.intervals.forEach((iv2, i) => {
+      seqRow.appendChild(el('span', {
+        class: `tmr-seq__item tmr-seq__item--${intervalBadgeKind(iv2.label)}${i === a.intIdx ? ' tmr-seq__item--on' : ''}`,
+        text: `${iv2.label} ${iv2.seconds}s`
+      }));
+    });
+    frag.appendChild(seqRow);
+
+    frag.appendChild(el('div', { class: 'tmr-controls' }, [
+      el('button', {
+        class: 'btn btn--primary tmr-controls__play', type: 'button',
+        text: a.running ? '⏸  Pause' : '▶  Resume',
+        onclick: () => { if (a.running) timerPause(); else timerResume(); render(); }
+      }),
+      el('button', {
+        class: 'btn tmr-controls__icon', type: 'button',
+        'aria-label': 'Skip interval', text: '⏭',
+        onclick: () => { timerSkip(); }
+      }),
+      el('button', {
+        class: 'btn btn--ghost tmr-controls__icon', type: 'button',
+        'aria-label': 'Stop timer', text: '⏹',
+        onclick: () => { if (confirm('Stop the timer?')) { timerStop(); state.timerView = 'list'; render(); } }
+      })
+    ]));
+
+    return frag;
+  }
+
+  /* ============================================================
      boot
      ============================================================ */
   function bindTabs() {
@@ -854,12 +1278,55 @@
     }
   }
 
-  // keep meals/checkins sorted on load (in case of manual edits / imports)
-  state.meals.sort((a, b) => new Date(b.eatenAt) - new Date(a.eatenAt));
-  state.checkins.sort((a, b) => new Date(b.feltAt) - new Date(a.feltAt));
+  if (!window.__clarityCaptureInternals) {
+    // keep meals/checkins sorted on load (in case of manual edits / imports)
+    state.meals.sort((a, b) => new Date(b.eatenAt) - new Date(a.eatenAt));
+    state.checkins.sort((a, b) => new Date(b.feltAt) - new Date(a.feltAt));
 
-  bindTabs();
-  render();
-  registerSW();
+    // When app resumes from background, fast-forward any intervals that elapsed.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && _timerActive && _timerActive.running) {
+        let limit = 500;
+        while (limit-- > 0 && _timerActive && _timerActive.running && !_timerActive.done && Date.now() >= _timerActive.endTime) {
+          const a = _timerActive;
+          a.intIdx++;
+          if (a.intIdx >= a.protocol.intervals.length) {
+            a.intIdx = 0;
+            a.setIdx++;
+            if (a.setIdx >= a.protocol.sets) {
+              a.done = true; a.running = false;
+              clearInterval(_timerTick); _timerTick = null;
+              break;
+            }
+          }
+          a.endTime = Date.now() + a.protocol.intervals[a.intIdx].seconds * 1000;
+        }
+        if (state.tab === 'timers') render();
+      }
+    });
+
+    bindTabs();
+    render();
+    registerSW();
+  }
+
+  // Test harness: expose internals when loaded by the test suite.
+  // window.__clarityCaptureInternals must be set BEFORE the script runs.
+  if (typeof window !== 'undefined' && window.__clarityCaptureInternals) {
+    const _exp = {
+      // pure utils
+      fmtCountdown, intervalBadgeKind, protoSummary,
+      kssGrade, energyGrade, fmtDur,
+      // timer engine
+      timerStart, timerPause, timerResume, timerSkip, timerStop, timerAdvance,
+      // protocol CRUD
+      addProtocol, deleteProtocol, saveProtocols,
+      // storage + state (direct references)
+      DB, state
+    };
+    // _timerActive is a let — expose via getter so tests always see current value
+    Object.defineProperty(_exp, '_timerActive', { get() { return _timerActive; }, enumerable: true });
+    window.__clarityInternals = _exp;
+  }
 
 })();

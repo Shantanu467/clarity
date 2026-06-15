@@ -191,7 +191,7 @@ button {
 /* ---------- Forms ---------- */
 .field { margin: 14px 0; }
 .field__label { font-weight: 700; font-size: 14px; color: var(--text-dim); margin-bottom: 8px; display: block; }
-input[type="datetime-local"], input[type="text"], textarea {
+input[type="datetime-local"], input[type="text"], input[type="number"], textarea {
   width: 100%;
   min-height: var(--tap);
   padding: 12px 14px;
@@ -352,3 +352,163 @@ textarea { min-height: 88px; resize: vertical; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ---------- Timer: countdown face ---------- */
+.tmr-face {
+  text-align: center;
+  padding: 32px 0 16px;
+}
+.tmr-countdown {
+  font-size: 90px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.tmr-label-badge {
+  display: inline-block;
+  margin-top: 14px;
+  padding: 6px 22px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #11161f;
+}
+.tmr-label-badge--work  { background: var(--s-okbad); }
+.tmr-label-badge--rest  { background: var(--s-good); }
+.tmr-label-badge--other { background: var(--accent); color: var(--accent-ink); }
+.tmr-set {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-top: 10px;
+}
+
+/* ---------- Timer: progress bar ---------- */
+.tmr-track {
+  height: 8px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  margin: 18px 0 12px;
+  overflow: hidden;
+}
+.tmr-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  width: 0;
+  transition: width .2s linear;
+}
+
+/* ---------- Timer: interval sequence chips ---------- */
+.tmr-seq {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 12px 0 4px;
+}
+.tmr-seq__item {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1.5px solid var(--border);
+}
+.tmr-seq__item--on { border-color: transparent; color: #11161f; }
+.tmr-seq__item--on.tmr-seq__item--work  { background: var(--s-okbad); }
+.tmr-seq__item--on.tmr-seq__item--rest  { background: var(--s-good); }
+.tmr-seq__item--on.tmr-seq__item--other { background: var(--accent); color: var(--accent-ink); }
+
+/* ---------- Timer: controls ---------- */
+.tmr-controls {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+  align-items: stretch;
+}
+.tmr-controls__play {
+  flex: 1;
+  min-height: 70px;
+  font-size: 20px;
+}
+.tmr-controls__icon {
+  width: 58px;
+  min-height: 58px;
+  flex: 0 0 auto;
+  font-size: 22px;
+  padding: 0;
+}
+
+/* ---------- Timer: done screen ---------- */
+.tmr-done { text-align: center; padding: 48px 0 24px; }
+.tmr-done__emoji { font-size: 64px; display: block; margin-bottom: 16px; }
+.tmr-done__title { font-size: 30px; font-weight: 800; }
+.tmr-done__sub { color: var(--text-dim); margin-top: 8px; font-size: 17px; }
+
+/* ---------- Protocol list ---------- */
+.proto-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 12px 14px 16px;
+}
+.proto-row__main { flex: 1; min-width: 0; }
+.proto-row__name { font-weight: 700; }
+.proto-row__meta { color: var(--text-dim); font-size: 14px; margin-top: 2px; }
+.proto-row__actions { display: flex; gap: 4px; flex: 0 0 auto; }
+.proto-row__actions button {
+  background: transparent; border: none;
+  font-size: 19px; min-height: 44px; min-width: 40px;
+  color: var(--text-dim); padding: 0;
+}
+.proto-row__start { color: var(--accent) !important; font-size: 23px !important; }
+
+/* ---------- Running-timer banner (in list view) ---------- */
+.card--timer-banner {
+  cursor: pointer;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+/* ---------- Protocol editor: interval rows ---------- */
+.int-list { display: flex; flex-direction: column; gap: 8px; }
+.int-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.int-row input[type="text"] {
+  flex: 1; min-height: 0; height: 44px;
+  padding: 8px 12px; font-weight: 600; width: auto;
+}
+.int-row input[type="number"] {
+  flex: 0 0 auto; width: 68px; height: 44px; min-height: 0;
+  padding: 8px; text-align: center; font-weight: 700; font-size: 17px;
+}
+.int-row__unit { font-weight: 700; color: var(--text-dim); font-size: 15px; flex: 0 0 auto; }
+.int-row__del {
+  background: transparent; border: none; font-size: 18px;
+  min-height: 44px; min-width: 36px; color: var(--text-dim); padding: 0; flex: 0 0 auto;
+}
+
+/* ---------- Sets stepper ---------- */
+.sets-stepper { display: flex; align-items: center; gap: 16px; }
+.sets-stepper button {
+  width: 50px; height: 50px; border-radius: 999px;
+  border: 1.5px solid var(--border); background: var(--surface-2);
+  font-size: 24px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+}
+.sets-stepper__val { font-size: 30px; font-weight: 800; min-width: 44px; text-align: center; }
