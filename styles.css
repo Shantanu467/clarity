@@ -267,6 +267,21 @@ textarea { min-height: 88px; resize: vertical; }
 .pill--bad { background: var(--s-bad); }
 .row__del { flex: 0 0 auto; background: transparent; border: none; color: var(--text-dim); font-size: 20px; min-height: 44px; min-width: 44px; }
 
+/* ---------- Compass: experiment "done" check + completed row ---------- */
+.check {
+  flex: 0 0 auto;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 18px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.check--on { background: var(--s-good); border-color: transparent; color: #11161f; }
+.row--done { opacity: .6; }
+.row--done .row__title { text-decoration: line-through; }
+
 /* ---------- Insight bars ---------- */
 .bar { margin: 10px 0; }
 .bar__head { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 5px; }

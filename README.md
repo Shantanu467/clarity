@@ -9,6 +9,10 @@ last meal, and shows patterns over time.
   (`localStorage`) and never leaves the device unless you export it.
 - **Installable.** Add to Home Screen on iOS for a full-screen, offline app.
 - **Zero dependencies.** Plain HTML/CSS/JS — nothing to build.
+- **Compass tab.** A low-friction *good-time journal* (rate absorption/energy/flow,
+  and note when the perfectionist "pinch" fires) plus an *experiment bank* — things to
+  try so the journal has signal — for finding your "specific knowledge." Export the
+  journal as CSV for analysis; everything is included in the JSON backup.
 
 ## Run locally
 

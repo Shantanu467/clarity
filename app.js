@@ -47,8 +47,10 @@
     checkins: 'clarity.checkins',
     settings: 'clarity.settings',
     lastBackup: 'clarity.lastBackup',
-    protocols: 'clarity.protocols',
-    schemaVersion: 2
+    protocols: 'clarity.protocols',  // Timers: interval protocols
+    journal: 'clarity.journal',      // Compass: good-time journal entries
+    expDone: 'clarity.expDone',      // Compass: { experimentId: true }
+    schemaVersion: 3
   };
 
   /* ---------------- storage ---------------- */
@@ -70,21 +72,27 @@
     tab: 'track',
     meals: DB.read(K.meals, []),
     checkins: DB.read(K.checkins, []),
+    journal: DB.read(K.journal, []),     // good-time journal entries (Compass)
+    expDone: DB.read(K.expDone, {}),     // experiments marked done (Compass)
     settings: Object.assign(
       { mealTypes: DEFAULT_MEAL_TYPES.slice(), schemaVersion: K.schemaVersion },
       DB.read(K.settings, {})
     ),
     // transient view state
-    draft: null,        // active check-in
-    mealForm: null,     // active meal form
+    draft: null,            // active check-in
+    mealForm: null,         // active meal form
+    gtjForm: null,          // active good-time journal entry (Compass)
+    compassSub: 'journal',  // 'journal' | 'experiments'
     // timers tab
     protocols: DB.read(K.protocols, []),
-    timerView: 'list',  // 'list' | 'running' | 'editor'
-    protoEdit: null     // protocol being created/edited
+    timerView: 'list',      // 'list' | 'running' | 'editor'
+    protoEdit: null         // protocol being created/edited
   };
 
   function saveMeals() { DB.write(K.meals, state.meals); }
   function saveCheckins() { DB.write(K.checkins, state.checkins); }
+  function saveJournal() { DB.write(K.journal, state.journal); }
+  function saveExpDone() { DB.write(K.expDone, state.expDone); }
 
   /* ---------------- tiny DOM helper (XSS-safe) ---------------- */
   // Renders user-supplied strings via textContent, never innerHTML.
@@ -274,11 +282,12 @@
      ============================================================ */
   function unbackedCount() {
     const last = DB.read(K.lastBackup, null);
-    if (!last) return state.checkins.length + state.meals.length;
+    if (!last) return state.checkins.length + state.meals.length + state.journal.length;
     const t = new Date(last).getTime();
     const newCk = state.checkins.filter(c => new Date(c.createdAt).getTime() > t).length;
     const newMl = state.meals.filter(m => new Date(m.eatenAt).getTime() > t).length;
-    return newCk + newMl;
+    const newJr = state.journal.filter(e => new Date(e.at).getTime() > t).length;
+    return newCk + newMl + newJr;
   }
   function markBackedUp() { DB.write(K.lastBackup, nowISO()); }
 
@@ -294,7 +303,8 @@
   function exportJSON() {
     const payload = {
       app: 'clarity', schemaVersion: K.schemaVersion, exportedAt: nowISO(),
-      meals: state.meals, checkins: state.checkins, settings: state.settings
+      meals: state.meals, checkins: state.checkins,
+      journal: state.journal, expDone: state.expDone, settings: state.settings
     };
     download(`clarity-backup-${new Date().toISOString().slice(0, 10)}.json`,
       JSON.stringify(payload, null, 2), 'application/json');
@@ -352,6 +362,8 @@
           state.settings = Object.assign(state.settings, { mealTypes: data.settings.mealTypes });
           DB.write(K.settings, state.settings);
         }
+        if (Array.isArray(data.journal)) { state.journal = data.journal; saveJournal(); }
+        if (data.expDone && typeof data.expDone === 'object') { state.expDone = data.expDone; saveExpDone(); }
         saveMeals(); saveCheckins();
         markBackedUp();
         toast('Backup restored');
@@ -368,6 +380,7 @@
     state.tab = tab;
     state.draft = null;
     state.mealForm = null;
+    state.gtjForm = null;
     if (tab === 'timers' && _timerActive && !_timerActive.done && state.timerView !== 'editor') {
       state.timerView = 'running';
     }
@@ -408,6 +421,7 @@
       else if (state.timerView === 'editor') root.appendChild(viewProtocolEditor());
       else root.appendChild(viewTimers());
     }
+    else if (state.tab === 'compass') root.appendChild(viewCompass());
     root.scrollTop = 0;
     window.scrollTo(0, 0);
   }
@@ -1264,6 +1278,264 @@
   }
 
   /* ============================================================
+     COMPASS — specific-knowledge project
+     A good-time journal + experiment bank. Local-first like the
+     rest of the app; entries live in localStorage (K.journal).
+     ============================================================ */
+
+  // Engagement 1..5 (higher = more absorbed)
+  const ENGAGE = [null, 'Bored / clock-watching', 'Meh', 'OK', 'Into it', 'Lost in it'];
+  // Energy afterward (stored as -1 / 0 / +1)
+  const ENERGY3 = [['Drained', -1], ['Neutral', 0], ['Charged', 1]];
+
+  // Experiment bank — things to try so the journal has signal.
+  // Grouped by "thread"; star = great starter, easy = fits a busy week.
+  const EXPERIMENTS = [
+    { thread: 'Capture (photography)', items: [
+      { id: 'cap1', text: 'Shoot one person you love for 20 min; give them 5 frames', metric: 'their reaction', star: true, easy: true },
+      { id: 'cap2', text: 'One photo a day for 7 days — only moments / emotion / movement', metric: 'which ones absorbed you', easy: true },
+      { id: 'cap3', text: 'Be the unofficial photographer at the next gathering', metric: 'your energy + a shot someone loved' },
+      { id: 'cap4', text: 'Rent or borrow a camera for a weekend before buying', metric: 'prototypes the purchase', star: true }
+    ]},
+    { thread: 'Teach / transmit', items: [
+      { id: 'tea1', text: 'Teach your meal-prep / health system to one person, 30 min', metric: 'did they get it + your energy', star: true, easy: true },
+      { id: 'tea2', text: 'Volunteer to onboard / train / present at the office', metric: 'energy during', easy: true },
+      { id: 'tea3', text: 'Write a 1-page “how to” for a friend who needs it', metric: 'did it actually help' }
+    ]},
+    { thread: 'Wonder → broadcast', items: [
+      { id: 'won1', text: '60-sec explainer of a cosmos thing, sent to a friend', metric: 'their “whoa”', star: true, easy: true },
+      { id: 'won2', text: 'One 1–2 min reel explaining a cool fact with visuals', metric: 'did anyone feel the wonder' },
+      { id: 'won3', text: '“One thing I learned” daily story for 7 days', metric: 'replies + your energy', easy: true }
+    ]},
+    { thread: 'Motion / speed', items: [
+      { id: 'mot1', text: 'Go-karting — but log it deliberately this time', metric: 'recharge, or do you want the craft?', easy: true },
+      { id: 'mot2', text: 'Shoot or film motion (cars, bikes, a kart session)', metric: 'absorption' },
+      { id: 'mot3', text: '20-min chat with someone in the motorsport world', metric: 'energized or deflated' }
+    ]},
+    { thread: 'Solve / negotiate', items: [
+      { id: 'sol1', text: 'Untangle one messy problem at work on purpose', metric: 'energized or drained', easy: true },
+      { id: 'sol2', text: 'Help mediate one disagreement', metric: 'your energy + did it resolve', easy: true }
+    ]},
+    { thread: 'Combos ✦ (where it probably hides)', items: [
+      { id: 'com1', text: 'Reel explaining a cosmos idea using your OWN footage', metric: 'photographer + vlogger + teacher at once', star: true },
+      { id: 'com2', text: 'A 2-min “how I shot this & why” for a friend', metric: 'teach + capture' },
+      { id: 'com3', text: 'Shoot a kart/car session and edit a 30-sec clip', metric: 'motion + capture' }
+    ]}
+  ];
+
+  function engageGrade(n) { return 6 - n; } // 5 absorbed -> grade 1 (green)
+  function engagePill(n) { return el('span', { class: 'pill pill--' + gradeClass(engageGrade(n)), text: String(n) }); }
+
+  function addJournalEntry(e) {
+    const rec = Object.assign({ id: uid(), at: nowISO() }, e);
+    state.journal.push(rec);
+    state.journal.sort((a, b) => new Date(b.at) - new Date(a.at));
+    saveJournal();
+    return rec;
+  }
+  function deleteJournalEntry(id) {
+    state.journal = state.journal.filter(x => x.id !== id);
+    saveJournal();
+  }
+  function newGtjForm(activity, experimentId) {
+    return { activity: activity || '', engagement: null, energy: null, flow: null, pinch: null, pinchTrigger: '', note: '', experimentId: experimentId || null };
+  }
+
+  function yesNoChips(val, onSet) {
+    const c = el('div', { class: 'chips' });
+    [['Yes', true], ['No', false]].forEach(([label, v]) => {
+      c.appendChild(el('button', { class: 'chip' + (val === v ? ' chip--on' : ''), type: 'button', onclick: () => onSet(val === v ? null : v) }, label));
+    });
+    return c;
+  }
+
+  function viewCompass() {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(el('h1', { class: 'h1', text: 'Compass' }));
+    frag.appendChild(el('p', { class: 'sub', text: 'Track what lights you up. Find the pattern.' }));
+
+    const seg = el('div', { class: 'chips', style: 'margin-bottom:8px' });
+    [['journal', 'Journal'], ['experiments', 'Experiments']].forEach(([key, label]) => {
+      seg.appendChild(el('button', { class: 'chip' + (state.compassSub === key ? ' chip--on' : ''), type: 'button', onclick: () => { state.compassSub = key; render(); } }, label));
+    });
+    frag.appendChild(seg);
+
+    frag.appendChild(state.compassSub === 'experiments' ? viewExperiments() : viewJournal());
+    return frag;
+  }
+
+  function viewJournal() {
+    const frag = document.createDocumentFragment();
+
+    if (state.gtjForm) {
+      frag.appendChild(gtjFormCard());
+    } else {
+      frag.appendChild(el('button', { class: 'btn btn--primary btn--lg', type: 'button', onclick: () => { state.gtjForm = newGtjForm(); render(); }, text: '＋  Log a good time' }));
+    }
+
+    frag.appendChild(el('h2', { class: 'h2', text: 'Recent' }));
+    if (!state.journal.length) {
+      frag.appendChild(emptyState('🧭', 'Nothing logged yet — catch a moment'));
+    } else {
+      const list = el('div', { class: 'list' });
+      state.journal.slice(0, 60).forEach(e => list.appendChild(journalRow(e)));
+      frag.appendChild(list);
+      frag.appendChild(el('div', { class: 'card', style: 'margin-top:16px' }, [
+        el('div', { class: 'row__meta', style: 'margin-bottom:10px', text: 'After ~2–3 weeks, circle your high-energy lines — then send me this.' }),
+        el('button', { class: 'btn', type: 'button', onclick: exportJournalCSV, text: 'Export journal (CSV)' })
+      ]));
+    }
+    return frag;
+  }
+
+  function gtjFormCard() {
+    const f = state.gtjForm;
+    const card = el('div', { class: 'card card--pad-lg' });
+
+    if (f.experimentId) {
+      card.appendChild(el('div', { class: 'row__meta', style: 'margin-bottom:6px', text: '✦ Logging an experiment' }));
+    }
+
+    card.appendChild(el('label', { class: 'field__label', text: 'What were you doing?' }));
+    const act = el('input', { type: 'text', placeholder: 'e.g. explained a star-birth clip to a friend' });
+    act.value = f.activity || '';
+    act.addEventListener('input', () => { f.activity = act.value; });
+    card.appendChild(act);
+
+    card.appendChild(el('label', { class: 'field__label', style: 'margin-top:16px', text: 'How absorbed were you?' }));
+    const eng = el('div', { class: 'chips' });
+    for (let i = 1; i <= 5; i++) {
+      eng.appendChild(el('button', { class: 'chip' + (f.engagement === i ? ' chip--on' : ''), type: 'button', onclick: () => { f.engagement = i; render(); } }, String(i)));
+    }
+    card.appendChild(eng);
+    card.appendChild(el('p', { class: 'muted', style: 'font-size:13px;margin:8px 0 0', text: f.engagement ? `${f.engagement} · ${ENGAGE[f.engagement]}` : '1 = bored · 5 = lost in it' }));
+
+    card.appendChild(el('label', { class: 'field__label', style: 'margin-top:16px', text: 'Energy afterward?' }));
+    const ene = el('div', { class: 'chips' });
+    ENERGY3.forEach(([label, val]) => {
+      ene.appendChild(el('button', { class: 'chip' + (f.energy === val ? ' chip--on' : ''), type: 'button', onclick: () => { f.energy = (f.energy === val ? null : val); render(); } }, label));
+    });
+    card.appendChild(ene);
+
+    card.appendChild(el('label', { class: 'field__label', style: 'margin-top:16px', text: 'Did time vanish? (flow)' }));
+    card.appendChild(yesNoChips(f.flow, (v) => { f.flow = v; render(); }));
+
+    card.appendChild(el('label', { class: 'field__label', style: 'margin-top:16px', text: 'Did the perfectionist critic show up?' }));
+    card.appendChild(yesNoChips(f.pinch, (v) => { f.pinch = v; render(); }));
+    if (f.pinch === true) {
+      const trig = el('input', { type: 'text', placeholder: 'what set it off? (e.g. compared to a pro)', style: 'margin-top:10px' });
+      trig.value = f.pinchTrigger || '';
+      trig.addEventListener('input', () => { f.pinchTrigger = trig.value; });
+      card.appendChild(trig);
+    }
+
+    card.appendChild(el('div', { class: 'field', style: 'margin-top:16px' }, [
+      el('label', { class: 'field__label', text: 'Note (optional)' }),
+      (function () { const ta = el('textarea', { placeholder: 'anything you noticed…' }); ta.value = f.note || ''; ta.addEventListener('input', () => { f.note = ta.value; }); return ta; })()
+    ]));
+
+    card.appendChild(el('div', { class: 'btn-row', style: 'margin-top:8px' }, [
+      el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => { state.gtjForm = null; render(); }, text: 'Cancel' }),
+      el('button', {
+        class: 'btn btn--primary', type: 'button', onclick: () => {
+          if (!f.activity.trim()) { toast('What were you doing?'); return; }
+          if (f.engagement == null) { toast('Pick an absorption level'); return; }
+          addJournalEntry({
+            activity: f.activity.trim(), engagement: f.engagement, energy: f.energy,
+            flow: f.flow, pinch: f.pinch, pinchTrigger: (f.pinchTrigger || '').trim() || null,
+            note: (f.note || '').trim() || null, experimentId: f.experimentId
+          });
+          state.gtjForm = null;
+          render();
+          toast('Logged ✓');
+        }, text: 'Save'
+      })
+    ]));
+    return card;
+  }
+
+  function journalRow(e) {
+    const bits = [`${fmtDay(e.at)} ${fmtClock(e.at)}`];
+    if (e.energy != null) bits.push('energy ' + (e.energy > 0 ? '↑' : e.energy < 0 ? '↓' : '→'));
+    if (e.flow) bits.push('flow');
+    if (e.pinch) bits.push('pinch' + (e.pinchTrigger ? ' (' + e.pinchTrigger + ')' : ''));
+    return el('div', { class: 'row' }, [
+      engagePill(e.engagement),
+      el('div', { class: 'row__main' }, [
+        el('div', { class: 'row__title', text: e.activity }),
+        el('div', { class: 'row__meta', text: bits.join(' · ') }),
+        e.note ? el('div', { class: 'row__meta', text: '“' + e.note + '”' }) : null
+      ]),
+      el('button', { class: 'row__del', type: 'button', 'aria-label': 'Delete entry', onclick: () => { if (confirm('Delete this entry?')) { deleteJournalEntry(e.id); render(); } }, text: '🗑' })
+    ]);
+  }
+
+  function viewExperiments() {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(el('p', { class: 'sub', style: 'margin-top:6px', text: 'Pick 3–4 across different threads. ⭐ great starter · 🟢 fits a busy week.' }));
+    const doneCount = Object.keys(state.expDone).filter(k => state.expDone[k]).length;
+    if (doneCount) frag.appendChild(el('p', { class: 'muted', style: 'margin:-10px 0 2px', text: doneCount + ' tried so far' }));
+
+    EXPERIMENTS.forEach(group => {
+      frag.appendChild(el('h2', { class: 'h2', text: group.thread }));
+      const list = el('div', { class: 'list' });
+      group.items.forEach(it => list.appendChild(experimentRow(it)));
+      frag.appendChild(list);
+    });
+
+    frag.appendChild(el('p', { class: 'muted center', style: 'margin-top:22px;font-size:13px', text: 'The only rule: did a real person feel or understand something? Never “is this world-class?”' }));
+    return frag;
+  }
+
+  function experimentRow(it) {
+    const done = !!state.expDone[it.id];
+    const tags = [];
+    if (it.star) tags.push('⭐');
+    if (it.easy) tags.push('🟢');
+    const meta = (tags.length ? tags.join(' ') + '  ' : '') + '→ ' + it.metric;
+    return el('div', { class: 'row' + (done ? ' row--done' : '') }, [
+      el('button', {
+        class: 'check' + (done ? ' check--on' : ''), type: 'button',
+        'aria-label': done ? 'Mark as not done' : 'Mark as done',
+        onclick: () => { if (done) delete state.expDone[it.id]; else state.expDone[it.id] = true; saveExpDone(); render(); },
+        text: done ? '✓' : '○'
+      }),
+      el('div', { class: 'row__main' }, [
+        el('div', { class: 'row__title', text: it.text }),
+        el('div', { class: 'row__meta', text: meta })
+      ]),
+      el('button', { class: 'btn', style: 'width:auto;flex:0 0 auto;min-height:40px;padding:0 14px', type: 'button', onclick: () => { state.gtjForm = newGtjForm(it.text, it.id); state.compassSub = 'journal'; render(); }, text: 'Log ›' })
+    ]);
+  }
+
+  function exportJournalCSV() {
+    if (!state.journal.length) { toast('Nothing to export yet'); return; }
+    const cols = ['timestamp', 'date', 'time', 'activity', 'engagement', 'engagement_label', 'energy', 'flow', 'pinch', 'pinch_trigger', 'experiment_id', 'note'];
+    const lines = [cols.join(',')];
+    const rows = state.journal.slice().sort((a, b) => new Date(a.at) - new Date(b.at));
+    for (const e of rows) {
+      const d = new Date(e.at);
+      lines.push([
+        e.at,
+        d.toLocaleDateString('en-CA'),
+        d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        e.activity,
+        e.engagement,
+        ENGAGE[e.engagement] || '',
+        e.energy == null ? '' : (e.energy > 0 ? 'charged' : e.energy < 0 ? 'drained' : 'neutral'),
+        e.flow == null ? '' : (e.flow ? 'yes' : 'no'),
+        e.pinch == null ? '' : (e.pinch ? 'yes' : 'no'),
+        e.pinchTrigger || '',
+        e.experimentId || '',
+        e.note || ''
+      ].map(csvCell).join(','));
+    }
+    download(`clarity-journal-${new Date().toISOString().slice(0, 10)}.csv`,
+      lines.join('\n'), 'text/csv');
+    toast('Journal CSV exported');
+  }
+
+  /* ============================================================
      boot
      ============================================================ */
   function bindTabs() {
@@ -1279,9 +1551,10 @@
   }
 
   if (!window.__clarityCaptureInternals) {
-    // keep meals/checkins sorted on load (in case of manual edits / imports)
+    // keep meals/checkins/journal sorted on load (in case of manual edits / imports)
     state.meals.sort((a, b) => new Date(b.eatenAt) - new Date(a.eatenAt));
     state.checkins.sort((a, b) => new Date(b.feltAt) - new Date(a.feltAt));
+    state.journal.sort((a, b) => new Date(b.at) - new Date(a.at));
 
     // When app resumes from background, fast-forward any intervals that elapsed.
     document.addEventListener('visibilitychange', () => {
