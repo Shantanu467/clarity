@@ -1,6 +1,6 @@
 /* Clarity service worker — caches the app shell for offline use.
    The app is local-first; this just makes it open without a network. */
-const CACHE = 'clarity-v2';
+const CACHE = 'clarity-v3';
 const SHELL = [
   './',
   './index.html',
